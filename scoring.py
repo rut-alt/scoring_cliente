@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from scoring import generate_scale, x_value_for_choice, xmin_by_weight
 
 st.set_page_config(page_title="Scoring Cliente", layout="wide")
 st.title("🧮 Calculadora de Scoring de Cliente (borrador)")
