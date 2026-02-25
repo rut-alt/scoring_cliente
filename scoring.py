@@ -3,7 +3,7 @@ import pandas as pd
 import random
 
 st.set_page_config(page_title="Calculadora Scoring Cliente", layout="wide")
-st.title("🧮 Calculadora de Scoring de Cliente (borrador)")
+st.title("Calculadora de Scoring de Cliente (borrador)")
 st.caption("Borrador: valores inventados (0–1). Score = Σ(Peso% · x). Puede calcular 1 cliente (inputs) o un archivo con muchos clientes.")
 
 # ---------------- Pesos (los vuestros) ----------------
@@ -153,6 +153,26 @@ def score_row(row: pd.Series) -> float:
 # ---------------- Modo archivo (batch) ----------------
 st.markdown("## 📤 Subir archivo para scoring masivo (varias filas)")
 uploaded = st.file_uploader("Sube CSV o Excel con una fila por cliente (columnas = variables)", type=["csv", "xlsx"])
+from openpyxl import Workbook
+from io import BytesIO
+
+def build_template_xlsx() -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Plantilla"
+    ws.append(list(WEIGHTS.keys()))
+    ws.append(["(elige una opción exacta o índice)"] + [""] * (len(WEIGHTS) - 1))
+
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+st.download_button(
+    "⬇️ Descargar plantilla Excel (vacía)",
+    data=build_template_xlsx(),
+    file_name="plantilla_clientes_scoring.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
 if uploaded is not None:
     try:
@@ -219,7 +239,7 @@ if uploaded is not None:
 st.divider()
 
 # ---------------- Modo 1 cliente (manual) ----------------
-st.markdown("## 🧍 Scoring manual de 1 cliente (inputs)")
+st.markdown("## Scoring manual de 1 cliente (inputs)")
 
 def ensure_state():
     for v in VAR_LIST:
