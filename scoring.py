@@ -96,48 +96,41 @@ CONFIG = {
 
 VAR_LIST = list(WEIGHTS.keys())
 
+
+# ---------- Helpers estado + aleatorio ----------
 def ensure_state():
-    if "selections" not in st.session_state:
-        st.session_state.selections = {v: 0 for v in VAR_LIST}
+    # inicializa las keys de los selectbox (sel_<var>)
+    for v in VAR_LIST:
+        key = f"sel_{v}"
+        if key not in st.session_state:
+            st.session_state[key] = 0
 
-def set_selection(var: str, idx: int):
-    labels, _ = CONFIG[var]
-    st.session_state.selections[var] = max(0, min(int(idx), len(labels) - 1))
 
-def pick_index_by_type(var: str, tipo: str) -> int:
-    labels, xs = CONFIG[var]
-    n = len(labels)
-
-    # Distribuciones simples (inventadas) para A/B/C:
-    # A: tiende a valores altos (últimas opciones)
-    # B: tiende a valores medios
-    # C: tiende a valores bajos (primeras opciones)
-    if n == 1:
+def choose_index_tipo(n: int, tipo: str) -> int:
+    """Devuelve un índice 0..n-1 con sesgo según tipo A/B/C."""
+    if n <= 1:
         return 0
 
-    if tipo == "A":
-        choices = list(range(n))
-        weights = [1 + i*i for i in choices]  # más peso a índices altos
-        return random.choices(choices, weights=weights, k=1)[0]
-
-    if tipo == "B":
+    if tipo == "A":       # alto: sesgo fuerte a índices altos
+        weights = [(i + 1) ** 3 for i in range(n)]
+    elif tipo == "B":     # medio: pico en el centro
         mid = (n - 1) / 2
-        choices = list(range(n))
-        weights = [1 / (1 + abs(i - mid)) for i in choices]  # pico en el centro
-        return random.choices(choices, weights=weights, k=1)[0]
+        weights = [1 / (1 + abs(i - mid)) for i in range(n)]
+    else:                 # C bajo: sesgo fuerte a índices bajos
+        weights = [(n - i) ** 3 for i in range(n)]
 
-    # tipo C
-    choices = list(range(n))
-    weights = [1 + (n - 1 - i) * (n - 1 - i) for i in choices]  # más peso a índices bajos
-    return random.choices(choices, weights=weights, k=1)[0]
+    return random.choices(range(n), weights=weights, k=1)[0]
 
-def random_client(tipo: str):
+
+def fill_random_client(tipo: str):
+    """Rellena los selectbox en session_state y luego se rerunea."""
     for v in VAR_LIST:
-        idx = pick_index_by_type(v, tipo)
-        set_selection(v, idx)
+        labels, _ = CONFIG[v]
+        st.session_state[f"sel_{v}"] = choose_index_tipo(len(labels), tipo)
+
 
 def load_client_from_df(df: pd.DataFrame):
-    # Usa la primera fila
+    """Carga primera fila: valores pueden ser índice o texto exacto de opción."""
     row = df.iloc[0].to_dict()
 
     for v in VAR_LIST:
@@ -147,37 +140,33 @@ def load_client_from_df(df: pd.DataFrame):
         val = row[v]
         labels, _ = CONFIG[v]
 
-        # Si viene como número (índice)
+        # número = índice
         if isinstance(val, (int, float)) and pd.notna(val):
-            set_selection(v, int(val))
+            st.session_state[f"sel_{v}"] = max(0, min(int(val), len(labels) - 1))
             continue
 
-        # Si viene como texto de la opción
+        # texto = label
         if isinstance(val, str):
             val_clean = val.strip()
             if val_clean in labels:
-                set_selection(v, labels.index(val_clean))
+                st.session_state[f"sel_{v}"] = labels.index(val_clean)
                 continue
-
-            # Intento: si han puesto "3" como texto
+            # si viene como "3" texto
             try:
-                set_selection(v, int(val_clean))
-                continue
+                idx = int(val_clean)
+                st.session_state[f"sel_{v}"] = max(0, min(idx, len(labels) - 1))
             except:
                 pass
 
-    st.success("Cliente cargado desde archivo (primera fila).")
 
 ensure_state()
 
-# --- Barra superior: subir archivo + aleatorios ---
+# ---------- Barra superior ----------
 st.markdown("## Acciones rápidas")
-
 c1, c2, c3, c4 = st.columns([1.4, 1, 1, 1])
 
 with c1:
     uploaded = st.file_uploader("📤 Subir cliente (CSV o Excel)", type=["csv", "xlsx"])
-
     if uploaded is not None:
         try:
             if uploaded.name.lower().endswith(".csv"):
@@ -188,27 +177,28 @@ with c1:
                 st.error("El archivo está vacío.")
             else:
                 load_client_from_df(df_up)
+                st.success("Cliente cargado desde archivo (primera fila).")
+                st.rerun()
         except Exception as e:
             st.error(f"No he podido leer el archivo: {e}")
 
 with c2:
     if st.button("🎲 Cliente aleatorio Tipo A (alto)"):
-        random_client("A")
-        st.success("Generado cliente aleatorio Tipo A.")
+        fill_random_client("A")
+        st.rerun()
 
 with c3:
     if st.button("🎲 Cliente aleatorio Tipo B (medio)"):
-        random_client("B")
-        st.success("Generado cliente aleatorio Tipo B.")
+        fill_random_client("B")
+        st.rerun()
 
 with c4:
     if st.button("🎲 Cliente aleatorio Tipo C (bajo)"):
-        random_client("C")
-        st.success("Generado cliente aleatorio Tipo C.")
+        fill_random_client("C")
+        st.rerun()
 
-
+# ---------- Inputs + cálculo ----------
 st.markdown("## Inputs del cliente")
-
 left, right = st.columns([1.3, 1])
 
 rows = []
@@ -218,18 +208,12 @@ with left:
     for var, weight in WEIGHTS.items():
         labels, xs = CONFIG[var]
 
-        current_idx = st.session_state.selections.get(var, 0)
-
         idx = st.selectbox(
             f"{var}  —  Peso {weight}%",
             options=list(range(len(labels))),
-            index=int(current_idx),
             format_func=lambda i: labels[i],
-            key=f"sel_{var}",
+            key=f"sel_{var}",  # clave controlada por session_state
         )
-
-        # guardamos en session_state
-        st.session_state.selections[var] = int(idx)
 
         x = float(xs[int(idx)])
         contrib = weight * x
@@ -246,11 +230,10 @@ with left:
 with right:
     st.markdown("## Resultado")
     st.metric("Score total del cliente (%)", f"{total:.2f}")
-
     st.info(
         "Notas:\n"
         "- Los valores x (0–1) son **inventados** para este borrador.\n"
-        "- Cambiar subcategorías = cambiar listas y valores en CONFIG.\n"
+        "- Los botones A/B/C rellenan los inputs con sesgo (alto/medio/bajo).\n"
         "- El archivo cargado debe tener columnas con nombres iguales a las variables."
     )
 
