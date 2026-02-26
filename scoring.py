@@ -386,23 +386,69 @@ def ensure_state():
             st.session_state[key] = 0
 
 
-def choose_index_tipo(n: int, tipo: str) -> int:
-    if n <= 1:
-        return 0
+def score_from_session() -> float:
+    """Calcula el score del cliente actual según lo seleccionado en session_state."""
+    total = 0.0
+    for var, weight in WEIGHTS.items():
+        labels, xs = CONFIG[var]
+        idx = int(st.session_state.get(f"sel_{var}", 0))
+        idx = max(0, min(idx, len(xs) - 1))
+        total += weight * float(xs[idx])
+    return float(total)
+
+
+def fill_random_client(tipo: str, max_tries: int = 400):
+    """
+    Genera un cliente aleatorio que caiga dentro del rango A/B/C configurado (a_min, b_min).
+    Reintenta hasta max_tries.
+    """
+    # define el rango objetivo
     if tipo == "A":
-        weights = [(i + 1) ** 3 for i in range(n)]
+        lo, hi = a_min, 100.0
     elif tipo == "B":
-        mid = (n - 1) / 2
-        weights = [1 / (1 + abs(i - mid)) for i in range(n)]
+        lo, hi = b_min, a_min - 1e-9
     else:
-        weights = [(n - i) ** 3 for i in range(n)]
-    return random.choices(range(n), weights=weights, k=1)[0]
+        lo, hi = 0.0, b_min - 1e-9
 
+    # si los umbrales son incoherentes, no forzamos rango
+    if b_min > a_min:
+        lo, hi = 0.0, 100.0
 
-def fill_random_client(tipo: str):
-    for v in VAR_LIST:
-        labels, _ = CONFIG[v]
-        st.session_state[f"sel_{v}"] = choose_index_tipo(len(labels), tipo)
+    best_score = None
+    best_state = None
+
+    for _ in range(max_tries):
+        # samplea índices aleatorios (uniforme)
+        for v in VAR_LIST:
+            labels, xs = CONFIG[v]
+            st.session_state[f"sel_{v}"] = random.randrange(len(xs))
+
+        s = score_from_session()
+
+        # ¿cumple rango?
+        if lo <= s <= hi:
+            return
+
+        # si no, guardamos el mejor candidato (por si no encontramos exacto)
+        if tipo == "A":
+            # queremos maximizar score
+            metric = s
+        elif tipo == "B":
+            # queremos cerca del centro del rango B
+            mid = (b_min + a_min) / 2.0
+            metric = -abs(s - mid)
+        else:
+            # queremos minimizar score
+            metric = -s
+
+        if best_score is None or metric > best_score:
+            best_score = metric
+            best_state = {f"sel_{v}": st.session_state[f"sel_{v}"] for v in VAR_LIST}
+
+    # fallback: aplica el mejor encontrado
+    if best_state:
+        for k, v in best_state.items():
+            st.session_state[k] = v
 
 
 ensure_state()
