@@ -159,7 +159,6 @@ st.caption("Carga el JSON exportado del taller. Score = Σ(Peso% · x). Modo 1 c
 # -------------------
 view = st.sidebar.radio("Pantalla", ["📊 Scoring", "👤 Resumen estratégico"])
 
-# Logo (si está en el repo en el mismo nivel)
 st.sidebar.image("LOGOTIPO-AES-05.png", use_container_width=True)
 st.sidebar.markdown("---")
 
@@ -239,6 +238,7 @@ def classify(score: float) -> str:
         return "D"
     return "E"
 
+
 # =========================================================
 # Helpers scoring (batch + manual)
 # =========================================================
@@ -278,7 +278,7 @@ def score_row(row: pd.Series) -> float:
 
 
 # -------------------------
-# Helpers generación A/B/C
+# Helpers generación A/B/C/D/E
 # -------------------------
 
 def ensure_state():
@@ -299,7 +299,6 @@ def score_from_session() -> float:
 
 
 def min_max_score_possible() -> Tuple[float, float]:
-    """Score mínimo y máximo teórico con el CONFIG actual (teniendo en cuenta invertidas)."""
     min_s, max_s = 0.0, 0.0
     for var, w in WEIGHTS.items():
         _, xs = CONFIG[var]
@@ -311,12 +310,6 @@ def min_max_score_possible() -> Tuple[float, float]:
 
 
 def set_all_indices(mode: str):
-    """
-    mode:
-      'max' -> mejor categoría (índice n-1)
-      'min' -> peor categoría (índice 0)
-      'mid' -> categoría intermedia (n//2)
-    """
     for var in VAR_LIST:
         _, xs = CONFIG[var]
         n = len(xs)
@@ -348,14 +341,11 @@ def score_from_state(state: Dict[str, int]) -> float:
 def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
     """
     Genera un cliente que cumpla los umbrales del sidebar:
-
       A: score >= a_min
       B: b_min <= score < a_min
       C: c_min <= score < b_min
       D: d_min <= score < c_min
       E: score < d_min
-
-    Devuelve: (ok, score, msg)
     """
 
     # Umbrales incoherentes
@@ -366,9 +356,6 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
 
     min_s, max_s = min_max_score_possible()
 
-    # -----------------------
-    # Definir rango objetivo
-    # -----------------------
     if tipo == "A":
         lo, hi = a_min, max_s
     elif tipo == "B":
@@ -380,28 +367,22 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
     else:  # E
         lo, hi = min_s, d_min - 1e-9
 
-    # Si el rango es imposible
     if lo > max_s + 1e-9:
         set_all_indices("max")
         s = score_from_session()
         return False, s, f"No se puede alcanzar {lo:.2f}%. Máximo teórico {max_s:.2f}%."
-
     if hi < min_s - 1e-9:
         set_all_indices("min")
         s = score_from_session()
         return False, s, f"No se puede bajar de {hi:.2f}%. Mínimo teórico {min_s:.2f}%."
 
-    # -----------------------
-    # Tipo A → construir desde arriba
-    # -----------------------
+    # A desde arriba con variación
     if tipo == "A":
         set_all_indices("max")
         s = score_from_session()
-
         if s < a_min:
             return False, s, f"Máximo {s:.2f}% no llega al umbral A."
 
-        # introducir ligera variabilidad
         vars_shuffled = VAR_LIST[:]
         random.shuffle(vars_shuffled)
 
@@ -422,18 +403,13 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
 
         return True, s, f"Cliente A generado (≥ {a_min:.2f}%)."
 
-    # -----------------------
-    # Tipo E → construir desde abajo
-    # -----------------------
+    # E desde abajo
     if tipo == "E":
         set_all_indices("min")
         s = score_from_session()
         return True, s, f"Cliente E generado (< {d_min:.2f}%)."
 
-    # -----------------------
-    # B / C / D → búsqueda aleatoria controlada
-    # -----------------------
-
+    # B/C/D: aleatorio controlado
     target_mid = (lo + hi) / 2.0
     best_state = None
     best_dist = None
@@ -441,8 +417,6 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
 
     for _ in range(tries):
         state = {}
-
-        # generar estado aleatorio
         for var in VAR_LIST:
             _, xs = CONFIG[var]
             state[f"sel_{var}"] = random.randint(0, len(xs) - 1)
@@ -460,7 +434,6 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
             best_state = state
             best_score = s
 
-    # fallback
     if best_state is not None:
         for k, v in best_state.items():
             st.session_state[k] = v
@@ -471,7 +444,7 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
     return False, s, "Fallback a cliente intermedio."
 
 
-def contributions_from_state(state: Dict[str, int]) -> pd.DataFrame:
+def contributions_from_state(state: Dict[str, int]) -> Tuple[pd.DataFrame, float]:
     rows = []
     total = 0.0
     for var, w in WEIGHTS.items():
@@ -488,27 +461,15 @@ def contributions_from_state(state: Dict[str, int]) -> pd.DataFrame:
             "x": x,
             "Contribución (%)": contrib,
         })
+
     df = pd.DataFrame(rows).sort_values("Contribución (%)", ascending=False)
     df["Contribución (%)"] = df["Contribución (%)"].round(4)
     return df, float(total)
 
 
 def make_representative_state(tipo: str) -> Dict[str, int]:
-    """
-    Estado "representativo" para la pantalla de resumen:
-    - A: max con un poco de variación manteniendo umbral
-    - B: intenta caer en rango (si puede)
-    - C: min
-    """
     ensure_state()
-    if tipo == "A":
-        ok, _, _ = fill_random_client("A", tries=250)
-        return current_state_dict()
-    if tipo == "B":
-        ok, _, _ = fill_random_client("B", tries=350)
-        return current_state_dict()
-    # C
-    set_all_indices("min")
+    ok, _, _ = fill_random_client(tipo, tries=350)
     return current_state_dict()
 
 
@@ -559,14 +520,19 @@ if view == "📊 Scoring":
                 df_res["Score_total_%"] = df_res.apply(score_row, axis=1)
                 df_res["Tipo"] = df_res["Score_total_%"].apply(classify)
 
-               dist = df_res["Tipo"].value_counts(normalize=True).reindex(["A", "B", "C", "D", "E"]).fillna(0) * 100
+                dist = (
+                    df_res["Tipo"]
+                    .value_counts(normalize=True)
+                    .reindex(["A", "B", "C", "D", "E"])
+                    .fillna(0) * 100
+                )
 
-cA, cB, cC, cD, cE = st.columns(5)
-cA.metric("% Tipo A", f"{dist['A']:.1f}%")
-cB.metric("% Tipo B", f"{dist['B']:.1f}%")
-cC.metric("% Tipo C", f"{dist['C']:.1f}%")
-cD.metric("% Tipo D", f"{dist['D']:.1f}%")
-cE.metric("% Tipo E", f"{dist['E']:.1f}%")
+                cA, cB, cC, cD, cE = st.columns(5)
+                cA.metric("% Tipo A", f"{dist['A']:.1f}%")
+                cB.metric("% Tipo B", f"{dist['B']:.1f}%")
+                cC.metric("% Tipo C", f"{dist['C']:.1f}%")
+                cD.metric("% Tipo D", f"{dist['D']:.1f}%")
+                cE.metric("% Tipo E", f"{dist['E']:.1f}%")
 
                 st.markdown("### Resultados por cliente")
                 id_col = st.selectbox(
@@ -612,36 +578,36 @@ cE.metric("% Tipo E", f"{dist['E']:.1f}%")
     # -------------------------
     st.markdown("## Scoring manual de 1 cliente (inputs)")
 
-ensure_state()
-min_s, max_s = min_max_score_possible()
-st.caption(f"Rango teórico con este modelo: mínimo {min_s:.2f}% · máximo {max_s:.2f}%")
+    ensure_state()
+    min_s, max_s = min_max_score_possible()
+    st.caption(f"Rango teórico con este modelo: mínimo {min_s:.2f}% · máximo {max_s:.2f}%")
 
-c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5 = st.columns(5)
 
-with c1:
-    if st.button("🎲 Tipo A (muy alto)", key="btnA"):
-        ok, s, msg = fill_random_client("A")
-        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+    with c1:
+        if st.button("🎲 Tipo A (muy alto)", key="btnA"):
+            ok, s, msg = fill_random_client("A")
+            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
 
-with c2:
-    if st.button("🎲 Tipo B (alto)", key="btnB"):
-        ok, s, msg = fill_random_client("B")
-        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+    with c2:
+        if st.button("🎲 Tipo B (alto)", key="btnB"):
+            ok, s, msg = fill_random_client("B")
+            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
 
-with c3:
-    if st.button("🎲 Tipo C (medio)", key="btnC"):
-        ok, s, msg = fill_random_client("C")
-        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+    with c3:
+        if st.button("🎲 Tipo C (medio)", key="btnC"):
+            ok, s, msg = fill_random_client("C")
+            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
 
-with c4:
-    if st.button("🎲 Tipo D (bajo)", key="btnD"):
-        ok, s, msg = fill_random_client("D")
-        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+    with c4:
+        if st.button("🎲 Tipo D (bajo)", key="btnD"):
+            ok, s, msg = fill_random_client("D")
+            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
 
-with c5:
-    if st.button("🎲 Tipo E (muy bajo)", key="btnE"):
-        ok, s, msg = fill_random_client("E")
-        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+    with c5:
+        if st.button("🎲 Tipo E (muy bajo)", key="btnE"):
+            ok, s, msg = fill_random_client("E")
+            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
 
     left, right = st.columns([1.3, 1])
     rows = []
@@ -673,7 +639,7 @@ with c5:
     with right:
         st.metric("Score total del cliente (%)", f"{total:.2f}")
         st.metric("Tipo", classify(total))
-        st.caption("Tipo A/B/C se calcula con los umbrales configurados en la barra lateral.")
+        st.caption("Tipo A/B/C/D/E se calcula con los umbrales configurados en la barra lateral.")
 
     st.dataframe(
         pd.DataFrame(rows).sort_values("Contribución (%)", ascending=False),
@@ -689,32 +655,21 @@ with c5:
 # =========================================================
 else:
     st.markdown("## 👤 Resumen estratégico (buyer persona)")
-    min_s, max_s = min_max_score_possible()
 
+    min_s, max_s = min_max_score_possible()
     st.info(
         f"Con el modelo actual, el score teórico va de **{min_s:.2f}%** a **{max_s:.2f}%**. "
-        f"Umbrales: **A ≥ {a_min:.1f}%**, **B ≥ {b_min:.1f}%**, **C < {b_min:.1f}%**."
+        f"Umbrales: **A ≥ {a_min:.1f}%**, **B ≥ {b_min:.1f}%**, **C ≥ {c_min:.1f}%**, **D ≥ {d_min:.1f}%**, **E < {d_min:.1f}%**."
     )
 
-    # Comprobaciones de viabilidad rápidas
-    if a_min > max_s + 1e-9:
-        st.warning(f"⚠️ Con este modelo, **no existe** ningún cliente que llegue a A ≥ {a_min:.1f}% (máximo {max_s:.2f}%).")
-    if b_min > max_s + 1e-9:
-        st.warning(f"⚠️ Con este modelo, **no existe** ningún cliente que llegue a B ≥ {b_min:.1f}% (máximo {max_s:.2f}%).")
-    if b_min > a_min:
-        st.warning("⚠️ Umbrales incoherentes: **B > A**. Ajusta el sidebar (b_min debe ser ≤ a_min).")
+    if not (a_min >= b_min >= c_min >= d_min):
+        st.warning("⚠️ Umbrales incoherentes: asegúrate de que **A ≥ B ≥ C ≥ D** (E queda por debajo de D).")
 
-    colA, colB, colC = st.columns(3)
+    # Generar estados representativos
+    types = ["A", "B", "C", "D", "E"]
+    icons = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🟠", "E": "🔴"}
 
-    # Estados representativos + drivers
-    stateA = make_representative_state("A")
-    dfA, scoreA = contributions_from_state(stateA)
-
-    stateB = make_representative_state("B")
-    dfB, scoreB = contributions_from_state(stateB)
-
-    stateC = make_representative_state("C")
-    dfC, scoreC = contributions_from_state(stateC)
+    cols = st.columns(5)
 
     def drivers_md(df: pd.DataFrame, topn: int = 5) -> str:
         top = df.head(topn)
@@ -723,66 +678,35 @@ else:
             lines.append(f"- **{r['Variable']}** → *{r['Selección']}* (**{r['Contribución (%)']:.2f}%**)")
         return "\n".join(lines)
 
-    with colA:
-        st.markdown("### 🟢 Cliente Tipo A")
-        st.markdown(f"**Score objetivo:** ≥ **{a_min:.1f}%**")
-        st.metric("Ejemplo generado", f"{scoreA:.2f}%")
-        st.markdown(
-            """
-**Perfil**
-- Alta afinidad con la propuesta
-- Alto valor esperado / buena estabilidad
+    for i, t in enumerate(types):
+        state = make_representative_state(t)
+        dfT, scoreT = contributions_from_state(state)
 
-**Qué hacer**
-- Fidelización
-- Cross-sell / up-sell
-- Beneficios premium
-"""
-        )
-        st.markdown("**Drivers (lo que más empuja el score)**")
-        st.markdown(drivers_md(dfA, topn=5))
+        with cols[i]:
+            st.markdown(f"### {icons[t]} Cliente Tipo {t}")
+            st.metric("Ejemplo generado", f"{scoreT:.2f}%")
 
-    with colB:
-        st.markdown("### 🟡 Cliente Tipo B")
-        st.markdown(f"**Score objetivo:** {b_min:.1f}% – {a_min:.1f}%")
-        st.metric("Ejemplo generado", f"{scoreB:.2f}%")
-        st.markdown(
-            """
-**Perfil**
-- Potencial de mejora
-- Valor medio, depende del plan de activación
+            if t == "A":
+                st.markdown("**Perfil**: máximo valor / afinidad.")
+                st.markdown("**Qué hacer**: fidelización, up/cross-sell, beneficios premium.")
+            elif t == "B":
+                st.markdown("**Perfil**: alto potencial, aún no top.")
+                st.markdown("**Qué hacer**: empuje comercial, bundles, upgrade suave.")
+            elif t == "C":
+                st.markdown("**Perfil**: medio, sensible a activación.")
+                st.markdown("**Qué hacer**: nudges, educación de producto, campañas tácticas.")
+            elif t == "D":
+                st.markdown("**Perfil**: bajo, requiere foco selectivo.")
+                st.markdown("**Qué hacer**: acciones de retención selectiva / revisión.")
+            else:
+                st.markdown("**Perfil**: muy bajo / riesgo.")
+                st.markdown("**Qué hacer**: contención, revisión técnica, minimizar exposición.")
 
-**Qué hacer**
-- Activación comercial
-- Nudges de engagement
-- Incentivos por vinculación
-"""
-        )
-        st.markdown("**Drivers (lo que más empuja el score)**")
-        st.markdown(drivers_md(dfB, topn=5))
-
-    with colC:
-        st.markdown("### 🔴 Cliente Tipo C")
-        st.markdown(f"**Score objetivo:** < **{b_min:.1f}%**")
-        st.metric("Ejemplo generado", f"{scoreC:.2f}%")
-        st.markdown(
-            """
-**Perfil**
-- Bajo valor esperado o riesgo más alto
-- Necesita revisión / contención
-
-**Qué hacer**
-- Revisión técnica / pricing
-- Reducir exposición
-- Estrategias de retención selectiva
-"""
-        )
-        st.markdown("**Drivers (lo que más empuja el score)**")
-        st.markdown(drivers_md(dfC, topn=5))
+            st.markdown("**Drivers (top 5)**")
+            st.markdown(drivers_md(dfT, topn=5))
 
     st.divider()
     st.markdown("### 🧾 Notas")
     st.write(
-        "Los ejemplos son *representativos* y se recalculan con tu JSON, variables invertidas, "
-        "xmin_floor y umbrales A/B/C actuales."
+        "Los ejemplos se recalculan con tu JSON, variables invertidas, xmin_floor y umbrales A/B/C/D/E actuales."
     )
