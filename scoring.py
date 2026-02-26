@@ -108,8 +108,14 @@ def generate_scale(
 def build_model_from_taller_json(
     model_dict: dict,
     xmin_floor: float,
-    invert_map: Dict[str, bool],
 ) -> Tuple[Dict[str, float], Dict[str, Tuple[List[str], List[float]]]]:
+    """
+    IMPORTANTE:
+    Asumimos que el taller ya define el orden:
+      K=1 = peor
+      K=k = mejor
+    Por tanto NO hay variables invertidas aquí.
+    """
     weights: Dict[str, float] = {}
     config: Dict[str, Tuple[List[str], List[float]]] = {}
 
@@ -135,11 +141,6 @@ def build_model_from_taller_json(
         scale = generate_scale(peso_pct=peso, k=k, xmin=None, xmin_floor=xmin_floor)
         xs = [c.x for c in scale["categories"]]  # peor -> mejor
 
-        # Si "más = peor", invertimos orden visual/índices
-        if invert_map.get(name, False):
-            xs = list(reversed(xs))
-            labels = list(reversed(labels))
-
         weights[name] = peso
         config[name] = (labels, xs)
 
@@ -154,14 +155,30 @@ st.set_page_config(page_title="Calculadora Scoring Cliente", layout="wide")
 st.title("Calculadora de Scoring de Cliente (con modelo del taller)")
 st.caption("Carga el JSON exportado del taller. Score = Σ(Peso% · x). Modo 1 cliente o archivo masivo.")
 
+
 # -------------------
 # Sidebar
 # -------------------
-view = st.sidebar.radio("Pantalla", [" A. Scoring", "B. Resumen estratégico"])
-
+view = st.sidebar.radio("Pantalla", ["A. Scoring", "B. Resumen estratégico"])
 st.sidebar.image("LOGOTIPO-AES-05.png", use_container_width=True)
 st.sidebar.markdown("---")
 
+# 1) Clasificación primero
+st.sidebar.header("Clasificación A/B/C/D/E")
+DEFAULT_A_MIN = 80.0
+DEFAULT_B_MIN = 65.0
+DEFAULT_C_MIN = 50.0
+DEFAULT_D_MIN = 30.0
+
+a_min = st.sidebar.slider("Tipo A si Score ≥", 0.0, 100.0, DEFAULT_A_MIN, 1.0)
+b_min = st.sidebar.slider("Tipo B si Score ≥", 0.0, 100.0, DEFAULT_B_MIN, 1.0)
+c_min = st.sidebar.slider("Tipo C si Score ≥", 0.0, 100.0, DEFAULT_C_MIN, 1.0)
+d_min = st.sidebar.slider("Tipo D si Score ≥", 0.0, 100.0, DEFAULT_D_MIN, 1.0)
+st.sidebar.caption("Tipo E automáticamente desde 0 hasta el umbral de D")
+
+st.sidebar.markdown("---")
+
+# 2) Modelo después
 st.sidebar.header("Modelo (JSON del taller)")
 uploaded_model = st.sidebar.file_uploader("Sube el JSON exportado del taller", type=["json"])
 
@@ -174,22 +191,6 @@ xmin_floor = st.sidebar.slider(
     help="Debe ser el mismo que usaste (o quieras usar) en el taller.",
 )
 
-# ----- Tipos A/B/C/D/E -----
-st.sidebar.divider()
-st.sidebar.header("Clasificación A/B/C/D/E")
-
-DEFAULT_A_MIN = 80.0
-DEFAULT_B_MIN = 65.0
-DEFAULT_C_MIN = 50.0
-DEFAULT_D_MIN = 30.0
-
-a_min = st.sidebar.slider("Tipo A si Score ≥", 0.0, 100.0, DEFAULT_A_MIN, 1.0)
-b_min = st.sidebar.slider("Tipo B si Score ≥", 0.0, 100.0, DEFAULT_B_MIN, 1.0)
-c_min = st.sidebar.slider("Tipo C si Score ≥", 0.0, 100.0, DEFAULT_C_MIN, 1.0)
-d_min = st.sidebar.slider("Tipo D si Score ≥", 0.0, 100.0, DEFAULT_D_MIN, 1.0)
-
-st.sidebar.caption("Tipo E automáticamente desde 0 hasta el umbral de D")
-
 
 def classify(score: float) -> str:
     if score >= a_min:
@@ -201,6 +202,25 @@ def classify(score: float) -> str:
     if score >= d_min:
         return "D"
     return "E"
+
+
+# --- Cargar JSON y construir modelo ANTES de usar WEIGHTS/CONFIG ---
+if uploaded_model is None:
+    st.info("Sube el JSON del taller en la barra lateral para cargar pesos/k/etiquetas.")
+    st.stop()
+
+try:
+    model = json.load(uploaded_model)
+except Exception as e:
+    st.error(f"No he podido leer el JSON: {e}")
+    st.stop()
+
+WEIGHTS, CONFIG = build_model_from_taller_json(model, xmin_floor=xmin_floor)
+VAR_LIST = list(WEIGHTS.keys())
+
+if not VAR_LIST:
+    st.error("El JSON no contiene variables válidas.")
+    st.stop()
 
 
 # =========================================================
@@ -241,9 +261,9 @@ def score_row(row: pd.Series) -> float:
     return float(total)
 
 
-# -------------------------
+# =========================================================
 # Helpers generación A/B/C/D/E
-# -------------------------
+# =========================================================
 
 def ensure_state():
     for v in VAR_LIST:
@@ -278,7 +298,7 @@ def set_all_indices(mode: str):
     mode:
       'max' -> índice con x máximo
       'min' -> índice con x mínimo
-      'mid' -> índice intermedio (n//2) (por orden visual)
+      'mid' -> índice intermedio (n//2)
     """
     for var in VAR_LIST:
         _, xs = CONFIG[var]
@@ -288,13 +308,14 @@ def set_all_indices(mode: str):
             continue
 
         if mode == "max":
-            best_idx = max(range(n), key=lambda i: xs[i])   # argmax
+            best_idx = max(range(n), key=lambda i: xs[i])
             st.session_state[f"sel_{var}"] = best_idx
         elif mode == "min":
-            worst_idx = min(range(n), key=lambda i: xs[i])  # argmin
+            worst_idx = min(range(n), key=lambda i: xs[i])
             st.session_state[f"sel_{var}"] = worst_idx
         else:
             st.session_state[f"sel_{var}"] = n // 2
+
 
 def current_state_dict() -> Dict[str, int]:
     return {f"sel_{v}": int(st.session_state.get(f"sel_{v}", 0)) for v in VAR_LIST}
@@ -312,15 +333,12 @@ def score_from_state(state: Dict[str, int]) -> float:
 
 def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
     """
-    Genera un cliente que cumpla los umbrales del sidebar:
-      A: score >= a_min
-      B: b_min <= score < a_min
-      C: c_min <= score < b_min
-      D: d_min <= score < c_min
-      E: score < d_min
+    A: score >= a_min
+    B: b_min <= score < a_min
+    C: c_min <= score < b_min
+    D: d_min <= score < c_min
+    E: score < d_min
     """
-
-    # Umbrales incoherentes
     if not (a_min >= b_min >= c_min >= d_min):
         set_all_indices("mid")
         s = score_from_session()
@@ -362,10 +380,14 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
             key = f"sel_{var}"
             _, xs = CONFIG[var]
             idx = int(st.session_state[key])
-            if idx <= 0:
-                continue
 
-            st.session_state[key] = idx - 1
+            # buscamos el siguiente índice "peor" (reduce x) de forma segura
+            candidates = [i for i in range(len(xs)) if xs[i] < xs[idx]]
+            if not candidates:
+                continue
+            new_idx = max(candidates, key=lambda i: xs[i])  # el peor más cercano
+
+            st.session_state[key] = new_idx
             s2 = score_from_session()
 
             if s2 >= a_min:
@@ -379,6 +401,8 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
     if tipo == "E":
         set_all_indices("min")
         s = score_from_session()
+        if s >= d_min:
+            return False, s, "El mínimo teórico no cae por debajo del umbral D. Ajusta d_min."
         return True, s, f"Cliente E generado (< {d_min:.2f}%)."
 
     # B/C/D: aleatorio controlado
@@ -441,18 +465,15 @@ def contributions_from_state(state: Dict[str, int]) -> Tuple[pd.DataFrame, float
 
 def make_representative_state(tipo: str) -> Dict[str, int]:
     ensure_state()
-    ok, _, _ = fill_random_client(tipo, tries=350)
+    fill_random_client(tipo, tries=350)
     return current_state_dict()
 
 
 # =========================================================
-# VISTA 1: SCORING
+# VISTA A: SCORING
 # =========================================================
-if view == "📊 Scoring":
+if view == "A. Scoring":
 
-    # -------------------------
-    # Modo archivo (batch)
-    # -------------------------
     st.markdown("## Subir archivo para scoring masivo (varias filas)")
     uploaded = st.file_uploader(
         "Sube CSV o Excel con una fila por cliente (columnas = variables)",
@@ -545,9 +566,6 @@ if view == "📊 Scoring":
 
     st.divider()
 
-    # -------------------------
-    # Modo 1 cliente (manual)
-    # -------------------------
     st.markdown("## Scoring manual de 1 cliente (inputs)")
 
     ensure_state()
@@ -623,7 +641,7 @@ if view == "📊 Scoring":
 
 
 # =========================================================
-# VISTA 2: RESUMEN ESTRATÉGICO (buyer persona)
+# VISTA B: RESUMEN ESTRATÉGICO
 # =========================================================
 else:
     st.markdown("## 👤 Resumen estratégico (buyer persona)")
@@ -637,10 +655,8 @@ else:
     if not (a_min >= b_min >= c_min >= d_min):
         st.warning("⚠️ Umbrales incoherentes: asegúrate de que **A ≥ B ≥ C ≥ D** (E queda por debajo de D).")
 
-    # Generar estados representativos
     types = ["A", "B", "C", "D", "E"]
     icons = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🟠", "E": "🔴"}
-
     cols = st.columns(5)
 
     def drivers_md(df: pd.DataFrame, topn: int = 5) -> str:
@@ -658,27 +674,11 @@ else:
             st.markdown(f"### {icons[t]} Cliente Tipo {t}")
             st.metric("Ejemplo generado", f"{scoreT:.2f}%")
 
-            if t == "A":
-                st.markdown("**Perfil**: máximo valor / afinidad.")
-                st.markdown("**Qué hacer**: fidelización, up/cross-sell, beneficios premium.")
-            elif t == "B":
-                st.markdown("**Perfil**: alto potencial, aún no top.")
-                st.markdown("**Qué hacer**: empuje comercial, bundles, upgrade suave.")
-            elif t == "C":
-                st.markdown("**Perfil**: medio, sensible a activación.")
-                st.markdown("**Qué hacer**: nudges, educación de producto, campañas tácticas.")
-            elif t == "D":
-                st.markdown("**Perfil**: bajo, requiere foco selectivo.")
-                st.markdown("**Qué hacer**: acciones de retención selectiva / revisión.")
-            else:
-                st.markdown("**Perfil**: muy bajo / riesgo.")
-                st.markdown("**Qué hacer**: contención, revisión técnica, minimizar exposición.")
-
             st.markdown("**Drivers (top 5)**")
             st.markdown(drivers_md(dfT, topn=5))
 
     st.divider()
     st.markdown("### 🧾 Notas")
     st.write(
-        "Los ejemplos se recalculan con tu JSON, variables invertidas, xmin_floor y umbrales A/B/C/D/E actuales."
+        "Los ejemplos se recalculan con tu JSON, xmin_floor y los umbrales A/B/C/D/E actuales."
     )
