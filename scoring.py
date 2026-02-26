@@ -160,7 +160,7 @@ st.sidebar.image("LOGOTIPO-AES-02.png", use_container_width=True)
 st.sidebar.markdown("---")
 
 st.sidebar.header("Modelo (JSON del taller)")
-st.sidebar.header("Modelo (JSON del taller)")
+
 uploaded_model = st.sidebar.file_uploader("Sube el JSON exportado del taller", type=["json"])
 
 xmin_floor = st.sidebar.slider(
