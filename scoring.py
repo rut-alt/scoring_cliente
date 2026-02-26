@@ -1,110 +1,233 @@
-import streamlit as st
-import pandas as pd
+# calculadora.py
+from __future__ import annotations
+
+import json
 import random
+from dataclasses import dataclass
+from io import BytesIO
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+import streamlit as st
+from openpyxl import Workbook
+
+
+# =========================================================
+# 1) LÓGICA DEL TALLER (generate_scale + xmin_floor)
+# =========================================================
+
+@dataclass(frozen=True)
+class CategoryResult:
+    j: int
+    x: float                 # valor normalizado en [xmin, 1]
+    contribution: float      # w * x (proporción)
+    contribution_pct: float  # w * x en %
+    delta_from_prev: float   # incremento vs categoría anterior (proporción)
+    delta_from_prev_pct: float
+
+
+def xmin_by_weight(w: float) -> float:
+    """
+    Asignación de x_min según el mapping del modelo.
+    w en proporción (7,5% = 0.075)
+    """
+    peso_pct = round(w * 100, 1)
+    if peso_pct <= 0:
+        return 0.0
+
+    mapping = {
+        7.5: 0.00,
+        5.5: 0.05,
+        5.0: 0.10,
+        4.5: 0.15,
+        4.0: 0.20,
+        3.0: 0.25,
+        2.5: 0.30,
+        2.0: 0.35,
+        1.5: 0.40,
+        1.0: 0.45,
+        0.5: 0.50,
+        0.0: 0.0,
+    }
+    return mapping.get(peso_pct, 0.20)
+
+
+def generate_scale(
+    peso_pct: float,
+    k: int,
+    xmin: Optional[float] = None,
+    xmin_floor: float = 0.01,
+) -> Dict:
+    """
+    Genera escala lógica de k categorías para una variable con peso 'peso_pct' (%).
+    - x(j) equiespaciado en [xmin, 1]
+    - contribution(j) = w * x(j)
+    """
+    if k < 2:
+        raise ValueError("k debe ser >= 2 (mínimo 2 categorías).")
+
+    w = peso_pct / 100.0
+
+    if xmin is None:
+        xmin = xmin_by_weight(w)
+
+    # Suelo mínimo: evita que la peor categoría aporte 0 si la variable existe
+    xmin = max(float(xmin_floor), float(xmin))
+    xmin = max(0.0, min(1.0, float(xmin)))
+
+    results: List[CategoryResult] = []
+    prev_contrib = 0.0
+
+    for j in range(1, k + 1):
+        if w == 0:
+            x = 0.0
+        else:
+            x = xmin + (j - 1) * (1.0 - xmin) / (k - 1)
+
+        contrib = w * x
+        delta = contrib - prev_contrib if j > 1 else 0.0
+
+        results.append(
+            CategoryResult(
+                j=j,
+                x=round(x, 6),
+                contribution=round(contrib, 6),
+                contribution_pct=round(contrib * 100.0, 4),
+                delta_from_prev=round(delta, 6),
+                delta_from_prev_pct=round(delta * 100.0, 4),
+            )
+        )
+        prev_contrib = contrib
+
+    x_min_effective = results[0].x if results else 0.0
+    x_max_effective = results[-1].x if results else 0.0
+    delta_max = w * (x_max_effective - x_min_effective)
+
+    return {
+        "peso_pct": float(peso_pct),
+        "w": float(w),
+        "k": int(k),
+        "xmin": float(xmin),
+        "x_min_effective": float(x_min_effective),
+        "x_max_effective": float(x_max_effective),
+        "delta_max": round(float(delta_max), 6),
+        "delta_max_pct": round(float(delta_max) * 100.0, 4),
+        "categories": results,
+    }
+
+
+def build_model_from_taller_json(
+    model_dict: dict,
+    xmin_floor: float,
+    invert_map: Dict[str, bool],
+) -> Tuple[Dict[str, float], Dict[str, Tuple[List[str], List[float]]]]:
+    """
+    Devuelve:
+      WEIGHTS: {var_name: peso_pct}
+      CONFIG:  {var_name: (labels, xs)}  xs calculado con generate_scale y (opcional) invertido
+    """
+    weights: Dict[str, float] = {}
+    config: Dict[str, Tuple[List[str], List[float]]] = {}
+
+    for v in model_dict.get("variables", []):
+        name = str(v.get("name", "")).strip()
+        if not name:
+            continue
+
+        peso = float(v.get("peso_pct", 0.0))
+        k = int(v.get("k", 3))
+        labels = list(v.get("labels") or [])
+
+        # normaliza labels a longitud k
+        if len(labels) < k:
+            labels = labels + [""] * (k - len(labels))
+        if len(labels) > k:
+            labels = labels[:k]
+
+        labels = [lab.strip() if isinstance(lab, str) and lab.strip() else f"K={i+1}" for i, lab in enumerate(labels)]
+
+        scale = generate_scale(peso_pct=peso, k=k, xmin=None, xmin_floor=xmin_floor)
+        xs = [c.x for c in scale["categories"]]  # peor -> mejor
+
+        if invert_map.get(name, False):
+            xs = list(reversed(xs))
+            labels = list(reversed(labels))
+
+        weights[name] = peso
+        config[name] = (labels, xs)
+
+    return weights, config
+
+
+# =========================================================
+# 2) APP
+# =========================================================
 
 st.set_page_config(page_title="Calculadora Scoring Cliente", layout="wide")
-st.title("Calculadora de Scoring de Cliente (borrador)")
-st.caption("Borrador: valores inventados (0–1). Score = Σ(Peso% · x). Puede calcular 1 cliente (inputs) o un archivo con muchos clientes.")
+st.title("Calculadora de Scoring de Cliente (con modelo del taller)")
+st.caption("Carga el JSON exportado del taller. Score = Σ(Peso% · x). Modo 1 cliente o archivo masivo.")
 
-# ---------------- Pesos (los vuestros) ----------------
-WEIGHTS = {
-    "Antigüedad 1ª contratación": 7.5,
-    "Vinculación: Nº de Ramos con nosotros": 7.5,
-    "Rentabilidad de la póliza actual": 7.5,
-    "Descuentos o Recargos aplicados sobre tarifa": 5.5,
-    "Morosidad": 5.0,
-    "Engagement comercial / Uso de canales propios": 4.5,
-    "Frecuencia uso coberturas complementarias (sin siniestralidad)": 4.5,
-    "Total asegurados / media asegurados por póliza": 4.5,
-    "Edad": 4.5,
-    "Rentabilidad histórica (LTV)": 4.5,
-    "Tipo de distribución": 4.5,
-    "Vinculación: Coberturas complementarias opcionales": 4.5,
-    "Contactabilidad": 4.0,
-    "Edad del asegurado más mayor": 4.0,
-    "Vinculación familiar": 3.0,
-    "Prescriptor": 3.0,
-    "Exposición a comunicaciones de marca": 3.0,
-    "Descendencia": 3.0,
-    "Medio de pago": 2.5,
-    "Frecuencia de pago (Periodicidad)": 2.0,
-    "Probabilidad de desglose": 1.5,
-    "Tipo de producto": 1.5,
-    "NPS": 1.5,
-    "Mascotas": 1.5,
-    "Localización (potencial de compra)": 1.5,
-    "Autónomo": 1.0,
-    "Siniestralidad (Salud)": 1.0,
-    "Grado de digitalización de la póliza": 0.5,
-    "Profesión": 0.5,
-    "Nivel educativo": 0.5,
-    "Sexo": 0.0,  # no aporta
+# ----- Sidebar: modelo + parámetros -----
+st.sidebar.header("Modelo (JSON del taller)")
+uploaded_model = st.sidebar.file_uploader("Sube el JSON exportado del taller", type=["json"])
+
+xmin_floor = st.sidebar.slider(
+    "Suelo mínimo xmin",
+    min_value=0.0,
+    max_value=0.30,
+    value=0.01,
+    step=0.01,
+    help="Debe ser el mismo que usaste (o quieras usar) en el taller.",
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("Variables invertidas (más = peor)")
+st.sidebar.caption("Marca las variables donde el orden natural es “más es peor”.")
+
+# Si quieres pre-marcar algunas por defecto, ponlas a True aquí (por nombre exacto del taller)
+DEFAULT_INVERT = {
+    "Descuentos o Recargos aplicados sobre tarifa": True,
+    "Morosidad: Históricos sin incidencia en devolución (Anotaciones de póliza)": True,
 }
 
-# ---------------- Subcategorías borrador + valores x ----------------
-CONFIG = {
-    "Antigüedad 1ª contratación": (["<1 año", "1–3", "3–5", "5–10", ">10"], [0.0, 0.25, 0.5, 0.75, 1.0]),
-    "Vinculación: Nº de Ramos con nosotros": (["1 ramo", "2", "3", "4", "5"], [0.0, 0.25, 0.5, 0.75, 1.0]),
-    "Rentabilidad de la póliza actual": (["Negativa", "Baja", "Media", "Alta", "Muy alta"], [0.0, 0.25, 0.5, 0.75, 1.0]),
+invert_map: Dict[str, bool] = {}
 
-    # cuanto más descuento peor
-    "Descuentos o Recargos aplicados sobre tarifa": (
-        [">20% desc", "10–20% desc", "0–10% desc", "Tarifa neutra", "Recargo / sin desc"],
-        [0.0, 0.25, 0.5, 0.75, 1.0]
-    ),
+if uploaded_model is None:
+    st.info("👈 Sube el JSON del taller en la barra lateral para cargar pesos/k/etiquetas.")
+    st.stop()
 
-    # más moroso peor
-    "Morosidad": (["Reincidente", "Varias incidencias", "Alguna incidencia", "Sin incidencias"], [0.0, 0.33, 0.66, 1.0]),
+try:
+    model = json.load(uploaded_model)
+except Exception as e:
+    st.error(f"No he podido leer el JSON: {e}")
+    st.stop()
 
-    "Engagement comercial / Uso de canales propios": (["Nulo", "Bajo", "Medio", "Alto"], [0.0, 0.33, 0.66, 1.0]),
-    "Frecuencia uso coberturas complementarias (sin siniestralidad)": (["Nunca", "Baja", "Media", "Alta"], [0.0, 0.33, 0.66, 1.0]),
-    "Total asegurados / media asegurados por póliza": (["1", "2", "3", "4", "5+"], [0.0, 0.25, 0.5, 0.75, 1.0]),
+# Lista de variables en el JSON (para pintar checkboxes de invert)
+var_names = [v.get("name") for v in model.get("variables", []) if isinstance(v, dict) and v.get("name")]
+for name in var_names:
+    invert_map[name] = st.sidebar.checkbox(
+        name,
+        value=DEFAULT_INVERT.get(name, False),
+        key=f"inv_{name}",
+    )
 
-    # óptimo en el medio
-    "Edad": (["<30", "30–50", ">50"], [0.6, 1.0, 0.5]),
-
-    "Rentabilidad histórica (LTV)": (["Muy baja", "Baja", "Media", "Alta", "Muy alta"], [0.0, 0.25, 0.5, 0.75, 1.0]),
-
-    # corredor malo, mediador bueno, propio buenísimo
-    "Tipo de distribución": (["Corredor", "Mediador", "Propio"], [0.0, 0.7, 1.0]),
-
-    "Vinculación: Coberturas complementarias opcionales": (["Ninguna", "1", "2", "3+"], [0.0, 0.33, 0.66, 1.0]),
-    "Contactabilidad": (["Baja (1 canal)", "Media (2 canales)", "Alta (3+ canales)"], [0.2, 0.6, 1.0]),
-    "Edad del asegurado más mayor": (["<50", "50–65", ">65"], [1.0, 0.6, 0.3]),
-
-    "Vinculación familiar": (["No", "Sí"], [0.4, 1.0]),
-    "Prescriptor": (["No", "Sí"], [0.5, 1.0]),
-    "Exposición a comunicaciones de marca": (["Baja", "Media", "Alta"], [0.3, 0.6, 1.0]),
-    "Descendencia": (["No", "Sí"], [0.6, 1.0]),
-
-    "Medio de pago": (["Efectivo/otros", "Tarjeta", "Domiciliación"], [0.4, 0.7, 1.0]),
-    "Frecuencia de pago (Periodicidad)": (["Mensual", "Trimestral", "Semestral", "Anual"], [0.4, 0.6, 0.8, 1.0]),
-
-    "Probabilidad de desglose": (["Alta", "Media", "Baja"], [0.2, 0.6, 1.0]),
-    "Tipo de producto": (["Básico", "Medio", "Premium"], [0.4, 0.7, 1.0]),
-    "NPS": (["Detractor", "Pasivo", "Promotor"], [0.0, 0.6, 1.0]),
-    "Mascotas": (["No", "Sí"], [0.6, 1.0]),
-    "Localización (potencial de compra)": (["Bajo", "Medio", "Alto"], [0.4, 0.7, 1.0]),
-
-    "Autónomo": (["No", "Sí"], [0.7, 1.0]),
-    "Siniestralidad (Salud)": (["Alta", "Media", "Baja", "Sin siniestros"], [0.0, 0.4, 0.7, 1.0]),
-    "Grado de digitalización de la póliza": (["Bajo", "Medio", "Alto"], [0.5, 0.75, 1.0]),
-    "Profesión": (["Sin dato / otros", "Estable"], [0.6, 1.0]),
-    "Nivel educativo": (["Sin dato", "Medio", "Alto"], [0.6, 0.8, 1.0]),
-    "Sexo": (["No aplica"], [0.0]),
-}
-
+# Construye WEIGHTS/CONFIG a partir del JSON del taller
+WEIGHTS, CONFIG = build_model_from_taller_json(model, xmin_floor=xmin_floor, invert_map=invert_map)
 VAR_LIST = list(WEIGHTS.keys())
 
-# ---------------- Tipos A/B/C (umbrales) ----------------
-# Ajusta estos cortes como quieras
+if not VAR_LIST:
+    st.error("El JSON no contiene variables válidas.")
+    st.stop()
+
+# ----- Tipos A/B/C -----
+st.sidebar.divider()
+st.sidebar.header("Clasificación A/B/C")
 DEFAULT_A_MIN = 65.0
 DEFAULT_B_MIN = 45.0
-
-st.sidebar.header("Clasificación A/B/C")
 a_min = st.sidebar.slider("Tipo A si Score ≥", 0.0, 100.0, DEFAULT_A_MIN, 1.0)
 b_min = st.sidebar.slider("Tipo B si Score ≥", 0.0, 100.0, DEFAULT_B_MIN, 1.0)
 st.sidebar.caption("Tipo C si Score < umbral de B")
+
 
 def classify(score: float) -> str:
     if score >= a_min:
@@ -113,35 +236,43 @@ def classify(score: float) -> str:
         return "B"
     return "C"
 
-# ---------------- Helpers ----------------
+
+# =========================================================
+# Helpers scoring
+# =========================================================
+
 def x_from_value(var: str, val) -> float:
-    """Convierte el valor del archivo (texto o índice) en x. Si falta/incorrecto, usa 0."""
+    """
+    Convierte el valor del archivo (texto o índice) en x.
+    - Si llega como número -> índice 0..k-1
+    - Si llega como texto -> match exacto de etiqueta o índice en texto
+    """
     labels, xs = CONFIG[var]
 
-    if pd.isna(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0.0
 
-    # si llega como número -> índice
+    # número -> índice
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         idx = int(val)
         if 0 <= idx < len(labels):
             return float(xs[idx])
         return 0.0
 
-    # si llega como texto -> match label
+    # texto -> match etiqueta o índice
     if isinstance(val, str):
         v = val.strip()
         if v in labels:
             return float(xs[labels.index(v)])
-        # si es "3" como texto
         try:
             idx = int(v)
             if 0 <= idx < len(labels):
                 return float(xs[idx])
-        except:
+        except Exception:
             pass
 
     return 0.0
+
 
 def score_row(row: pd.Series) -> float:
     total = 0.0
@@ -150,22 +281,27 @@ def score_row(row: pd.Series) -> float:
         total += weight * x
     return float(total)
 
-# ---------------- Modo archivo (batch) ----------------
+
+# =========================================================
+# Modo archivo (batch)
+# =========================================================
+
 st.markdown("## 📤 Subir archivo para scoring masivo (varias filas)")
 uploaded = st.file_uploader("Sube CSV o Excel con una fila por cliente (columnas = variables)", type=["csv", "xlsx"])
-from openpyxl import Workbook
-from io import BytesIO
+
 
 def build_template_xlsx() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Plantilla"
+
     ws.append(list(WEIGHTS.keys()))
-    ws.append(["(elige una opción exacta o índice)"] + [""] * (len(WEIGHTS) - 1))
+    ws.append(["(elige una opción exacta o índice 0..k-1)"] + [""] * (len(WEIGHTS) - 1))
 
     bio = BytesIO()
     wb.save(bio)
     return bio.getvalue()
+
 
 st.download_button(
     "⬇️ Descargar plantilla Excel (vacía)",
@@ -191,16 +327,14 @@ if uploaded is not None:
             df_res["Score_total_%"] = df_res.apply(score_row, axis=1)
             df_res["Tipo"] = df_res["Score_total_%"].apply(classify)
 
-            # Porcentajes A/B/C
+            # Distribución A/B/C
             dist = df_res["Tipo"].value_counts(normalize=True).reindex(["A", "B", "C"]).fillna(0) * 100
-
             cA, cB, cC = st.columns(3)
             cA.metric("% Tipo A", f"{dist['A']:.1f}%")
             cB.metric("% Tipo B", f"{dist['B']:.1f}%")
             cC.metric("% Tipo C", f"{dist['C']:.1f}%")
 
             st.markdown("### Resultados por cliente")
-            # Si el archivo tiene una columna identificadora, puedes escogerla
             id_col = st.selectbox(
                 "Columna identificadora (opcional, para mostrar primero)",
                 options=["(ninguna)"] + list(df_up.columns),
@@ -212,13 +346,13 @@ if uploaded is not None:
                 show_cols.append(id_col)
 
             show_cols += ["Score_total_%", "Tipo"]
-            # añade algunas variables al final (no todas) para no saturar
+
             sample_vars = [v for v in VAR_LIST if v in df_res.columns][:6]
             show_cols += sample_vars
 
             st.dataframe(df_res[show_cols].sort_values("Score_total_%", ascending=False), use_container_width=True)
 
-            # Descarga CSV con resultados completos
+            # Descarga resultados
             csv_bytes = df_res.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Descargar resultados (CSV)",
@@ -229,7 +363,7 @@ if uploaded is not None:
 
             st.markdown("#### Nota")
             st.write(
-                "Si alguna variable no está en el archivo o no coincide exactamente con una opción, "
+                "Si alguna variable no está en el archivo o no coincide exactamente con una opción/índice, "
                 "esa variable cuenta como x=0 en ese cliente."
             )
 
@@ -238,14 +372,19 @@ if uploaded is not None:
 
 st.divider()
 
-# ---------------- Modo 1 cliente (manual) ----------------
+# =========================================================
+# Modo 1 cliente (manual)
+# =========================================================
+
 st.markdown("## Scoring manual de 1 cliente (inputs)")
+
 
 def ensure_state():
     for v in VAR_LIST:
         key = f"sel_{v}"
         if key not in st.session_state:
             st.session_state[key] = 0
+
 
 def choose_index_tipo(n: int, tipo: str) -> int:
     if n <= 1:
@@ -259,10 +398,12 @@ def choose_index_tipo(n: int, tipo: str) -> int:
         weights = [(n - i) ** 3 for i in range(n)]
     return random.choices(range(n), weights=weights, k=1)[0]
 
+
 def fill_random_client(tipo: str):
     for v in VAR_LIST:
         labels, _ = CONFIG[v]
         st.session_state[f"sel_{v}"] = choose_index_tipo(len(labels), tipo)
+
 
 ensure_state()
 
@@ -287,21 +428,24 @@ total = 0.0
 with left:
     for var, weight in WEIGHTS.items():
         labels, xs = CONFIG[var]
+
         idx = st.selectbox(
             f"{var}  —  Peso {weight}%",
             options=list(range(len(labels))),
             format_func=lambda i: labels[i],
             key=f"sel_{var}",
         )
+
         x = float(xs[int(idx)])
         contrib = weight * x
         total += contrib
+
         rows.append({
             "Variable": var,
             "Selección": labels[int(idx)],
             "Peso (%)": weight,
-            "x (0-1)": round(x, 3),
-            "Contribución (%)": round(contrib, 3),
+            "x (0-1)": round(x, 6),
+            "Contribución (%)": round(contrib, 4),
         })
 
 with right:
