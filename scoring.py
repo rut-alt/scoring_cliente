@@ -27,10 +27,6 @@ class CategoryResult:
 
 
 def xmin_by_weight(w: float) -> float:
-    """
-    Asignación de x_min según el mapping del modelo.
-    w en proporción (7,5% = 0.075)
-    """
     peso_pct = round(w * 100, 1)
     if peso_pct <= 0:
         return 0.0
@@ -58,11 +54,6 @@ def generate_scale(
     xmin: Optional[float] = None,
     xmin_floor: float = 0.01,
 ) -> Dict:
-    """
-    Genera escala lógica de k categorías para una variable con peso 'peso_pct' (%).
-    - x(j) equiespaciado en [xmin, 1]
-    - contribution(j) = w * x(j)
-    """
     if k < 2:
         raise ValueError("k debe ser >= 2 (mínimo 2 categorías).")
 
@@ -71,7 +62,6 @@ def generate_scale(
     if xmin is None:
         xmin = xmin_by_weight(w)
 
-    # Suelo mínimo: evita que la peor categoría aporte 0 si la variable existe
     xmin = max(float(xmin_floor), float(xmin))
     xmin = max(0.0, min(1.0, float(xmin)))
 
@@ -121,11 +111,6 @@ def build_model_from_taller_json(
     xmin_floor: float,
     invert_map: Dict[str, bool],
 ) -> Tuple[Dict[str, float], Dict[str, Tuple[List[str], List[float]]]]:
-    """
-    Devuelve:
-      WEIGHTS: {var_name: peso_pct}
-      CONFIG:  {var_name: (labels, xs)}  xs calculado con generate_scale y (opcional) invertido
-    """
     weights: Dict[str, float] = {}
     config: Dict[str, Tuple[List[str], List[float]]] = {}
 
@@ -138,13 +123,15 @@ def build_model_from_taller_json(
         k = int(v.get("k", 3))
         labels = list(v.get("labels") or [])
 
-        # normaliza labels a longitud k
         if len(labels) < k:
             labels = labels + [""] * (k - len(labels))
         if len(labels) > k:
             labels = labels[:k]
 
-        labels = [lab.strip() if isinstance(lab, str) and lab.strip() else f"K={i+1}" for i, lab in enumerate(labels)]
+        labels = [
+            lab.strip() if isinstance(lab, str) and lab.strip() else f"K={i+1}"
+            for i, lab in enumerate(labels)
+        ]
 
         scale = generate_scale(peso_pct=peso, k=k, xmin=None, xmin_floor=xmin_floor)
         xs = [c.x for c in scale["categories"]]  # peor -> mejor
@@ -167,7 +154,6 @@ st.set_page_config(page_title="Calculadora Scoring Cliente", layout="wide")
 st.title("Calculadora de Scoring de Cliente (con modelo del taller)")
 st.caption("Carga el JSON exportado del taller. Score = Σ(Peso% · x). Modo 1 cliente o archivo masivo.")
 
-# ----- Sidebar: modelo + parámetros -----
 st.sidebar.header("Modelo (JSON del taller)")
 uploaded_model = st.sidebar.file_uploader("Sube el JSON exportado del taller", type=["json"])
 
@@ -184,7 +170,6 @@ st.sidebar.divider()
 st.sidebar.subheader("Variables invertidas (más = peor)")
 st.sidebar.caption("Marca las variables donde el orden natural es “más es peor”.")
 
-# Si quieres pre-marcar algunas por defecto, ponlas a True aquí (por nombre exacto del taller)
 DEFAULT_INVERT = {
     "Descuentos o Recargos aplicados sobre tarifa": True,
     "Morosidad: Históricos sin incidencia en devolución (Anotaciones de póliza)": True,
@@ -202,7 +187,6 @@ except Exception as e:
     st.error(f"No he podido leer el JSON: {e}")
     st.stop()
 
-# Lista de variables en el JSON (para pintar checkboxes de invert)
 var_names = [v.get("name") for v in model.get("variables", []) if isinstance(v, dict) and v.get("name")]
 for name in var_names:
     invert_map[name] = st.sidebar.checkbox(
@@ -211,7 +195,6 @@ for name in var_names:
         key=f"inv_{name}",
     )
 
-# Construye WEIGHTS/CONFIG a partir del JSON del taller
 WEIGHTS, CONFIG = build_model_from_taller_json(model, xmin_floor=xmin_floor, invert_map=invert_map)
 VAR_LIST = list(WEIGHTS.keys())
 
@@ -242,24 +225,17 @@ def classify(score: float) -> str:
 # =========================================================
 
 def x_from_value(var: str, val) -> float:
-    """
-    Convierte el valor del archivo (texto o índice) en x.
-    - Si llega como número -> índice 0..k-1
-    - Si llega como texto -> match exacto de etiqueta o índice en texto
-    """
     labels, xs = CONFIG[var]
 
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0.0
 
-    # número -> índice
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         idx = int(val)
         if 0 <= idx < len(labels):
             return float(xs[idx])
         return 0.0
 
-    # texto -> match etiqueta o índice
     if isinstance(val, str):
         v = val.strip()
         if v in labels:
@@ -294,7 +270,6 @@ def build_template_xlsx() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Plantilla"
-
     ws.append(list(WEIGHTS.keys()))
     ws.append(["(elige una opción exacta o índice 0..k-1)"] + [""] * (len(WEIGHTS) - 1))
 
@@ -322,12 +297,10 @@ if uploaded is not None:
         else:
             st.success(f"Archivo cargado: {df_up.shape[0]} clientes, {df_up.shape[1]} columnas.")
 
-            # Calcula score por fila
             df_res = df_up.copy()
             df_res["Score_total_%"] = df_res.apply(score_row, axis=1)
             df_res["Tipo"] = df_res["Score_total_%"].apply(classify)
 
-            # Distribución A/B/C
             dist = df_res["Tipo"].value_counts(normalize=True).reindex(["A", "B", "C"]).fillna(0) * 100
             cA, cB, cC = st.columns(3)
             cA.metric("% Tipo A", f"{dist['A']:.1f}%")
@@ -346,13 +319,11 @@ if uploaded is not None:
                 show_cols.append(id_col)
 
             show_cols += ["Score_total_%", "Tipo"]
-
             sample_vars = [v for v in VAR_LIST if v in df_res.columns][:6]
             show_cols += sample_vars
 
             st.dataframe(df_res[show_cols].sort_values("Score_total_%", ascending=False), use_container_width=True)
 
-            # Descarga resultados
             csv_bytes = df_res.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "⬇️ Descargar resultados (CSV)",
@@ -387,7 +358,6 @@ def ensure_state():
 
 
 def score_from_session() -> float:
-    """Calcula el score del cliente actual según lo seleccionado en session_state."""
     total = 0.0
     for var, weight in WEIGHTS.items():
         labels, xs = CONFIG[var]
@@ -397,58 +367,60 @@ def score_from_session() -> float:
     return float(total)
 
 
-def fill_random_client(tipo: str, max_tries: int = 400):
-    """
-    Genera un cliente aleatorio que caiga dentro del rango A/B/C configurado (a_min, b_min).
-    Reintenta hasta max_tries.
-    """
-    # define el rango objetivo
-    if tipo == "A":
-        lo, hi = a_min, 100.0
-    elif tipo == "B":
-        lo, hi = b_min, a_min - 1e-9
-    else:
-        lo, hi = 0.0, b_min - 1e-9
-
-    # si los umbrales son incoherentes, no forzamos rango
+def get_target_range(tipo: str) -> Tuple[float, float]:
+    # normaliza umbrales incoherentes
     if b_min > a_min:
-        lo, hi = 0.0, 100.0
+        return 0.0, 100.0
 
-    best_score = None
+    if tipo == "A":
+        return a_min, 100.0
+    if tipo == "B":
+        return b_min, a_min - 1e-9
+    return 0.0, b_min - 1e-9
+
+
+def fill_random_client(tipo: str, max_tries: int = 1500):
+    """
+    Genera un cliente aleatorio que CAIGA en el rango A/B/C configurado en el sidebar.
+    Si no encuentra exacto, aplica el mejor candidato encontrado y avisa.
+    """
+    lo, hi = get_target_range(tipo)
+
+    best_metric = None
     best_state = None
+    best_score = None
 
     for _ in range(max_tries):
-        # samplea índices aleatorios (uniforme)
         for v in VAR_LIST:
             labels, xs = CONFIG[v]
             st.session_state[f"sel_{v}"] = random.randrange(len(xs))
 
         s = score_from_session()
 
-        # ¿cumple rango?
+        # éxito: cae en rango
         if lo <= s <= hi:
-            return
+            return True, s
 
-        # si no, guardamos el mejor candidato (por si no encontramos exacto)
+        # métrica de "mejor acercamiento" según tipo
         if tipo == "A":
-            # queremos maximizar score
-            metric = s
-        elif tipo == "B":
-            # queremos cerca del centro del rango B
-            mid = (b_min + a_min) / 2.0
-            metric = -abs(s - mid)
+            metric = s  # maximizar
+        elif tipo == "C":
+            metric = -s  # minimizar
         else:
-            # queremos minimizar score
-            metric = -s
+            mid = (b_min + a_min) / 2.0 if b_min <= a_min else 50.0
+            metric = -abs(s - mid)  # acercarse al centro
 
-        if best_score is None or metric > best_score:
-            best_score = metric
+        if best_metric is None or metric > best_metric:
+            best_metric = metric
             best_state = {f"sel_{v}": st.session_state[f"sel_{v}"] for v in VAR_LIST}
+            best_score = s
 
-    # fallback: aplica el mejor encontrado
-    if best_state:
+    # fallback: aplica el mejor candidato (aunque no esté en rango)
+    if best_state is not None:
         for k, v in best_state.items():
             st.session_state[k] = v
+
+    return False, best_score
 
 
 ensure_state()
@@ -456,15 +428,23 @@ ensure_state()
 c2, c3, c4 = st.columns(3)
 with c2:
     if st.button("🎲 Cliente aleatorio Tipo A (alto)", key="btnA"):
-        fill_random_client("A")
+        ok, s = fill_random_client("A")
+        if not ok:
+            st.warning(f"No encontré un cliente en rango A tras varios intentos. Te dejo el mejor candidato: {s:.2f}%.")
         st.rerun()
+
 with c3:
     if st.button("🎲 Cliente aleatorio Tipo B (medio)", key="btnB"):
-        fill_random_client("B")
+        ok, s = fill_random_client("B")
+        if not ok:
+            st.warning(f"No encontré un cliente en rango B tras varios intentos. Te dejo el mejor candidato: {s:.2f}%.")
         st.rerun()
+
 with c4:
     if st.button("🎲 Cliente aleatorio Tipo C (bajo)", key="btnC"):
-        fill_random_client("C")
+        ok, s = fill_random_client("C")
+        if not ok:
+            st.warning(f"No encontré un cliente en rango C tras varios intentos. Te dejo el mejor candidato: {s:.2f}%.")
         st.rerun()
 
 left, right = st.columns([1.3, 1])
