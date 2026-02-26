@@ -211,14 +211,21 @@ if not VAR_LIST:
     st.error("El JSON no contiene variables válidas.")
     st.stop()
 
-# ----- Tipos A/B/C -----
+# ----- Tipos A/B/C/D/E -----
 st.sidebar.divider()
-st.sidebar.header("Clasificación A/B/C")
-DEFAULT_A_MIN = 65.0
-DEFAULT_B_MIN = 45.0
+st.sidebar.header("Clasificación A/B/C/D/E")
+
+DEFAULT_A_MIN = 80.0
+DEFAULT_B_MIN = 65.0
+DEFAULT_C_MIN = 50.0
+DEFAULT_D_MIN = 30.0
+
 a_min = st.sidebar.slider("Tipo A si Score ≥", 0.0, 100.0, DEFAULT_A_MIN, 1.0)
 b_min = st.sidebar.slider("Tipo B si Score ≥", 0.0, 100.0, DEFAULT_B_MIN, 1.0)
-st.sidebar.caption("Tipo C si Score < umbral de B")
+c_min = st.sidebar.slider("Tipo C si Score ≥", 0.0, 100.0, DEFAULT_C_MIN, 1.0)
+d_min = st.sidebar.slider("Tipo D si Score ≥", 0.0, 100.0, DEFAULT_D_MIN, 1.0)
+
+st.sidebar.caption("Tipo E automáticamente desde 0 hasta el umbral de D")
 
 
 def classify(score: float) -> str:
@@ -226,8 +233,11 @@ def classify(score: float) -> str:
         return "A"
     if score >= b_min:
         return "B"
-    return "C"
-
+    if score >= c_min:
+        return "C"
+    if score >= d_min:
+        return "D"
+    return "E"
 
 # =========================================================
 # Helpers scoring (batch + manual)
@@ -338,105 +348,111 @@ def score_from_state(state: Dict[str, int]) -> float:
 def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
     """
     Genera un cliente que cumpla los umbrales del sidebar:
+
       A: score >= a_min
       B: b_min <= score < a_min
-      C: score < b_min
+      C: c_min <= score < b_min
+      D: d_min <= score < c_min
+      E: score < d_min
 
     Devuelve: (ok, score, msg)
     """
+
     # Umbrales incoherentes
-    if b_min > a_min:
+    if not (a_min >= b_min >= c_min >= d_min):
         set_all_indices("mid")
         s = score_from_session()
-        return True, s, "Umbrales incoherentes (B > A). He generado un cliente intermedio."
+        return True, s, "Umbrales incoherentes. Revisa que A ≥ B ≥ C ≥ D."
 
     min_s, max_s = min_max_score_possible()
 
-    # Rangos objetivo
+    # -----------------------
+    # Definir rango objetivo
+    # -----------------------
     if tipo == "A":
         lo, hi = a_min, max_s
     elif tipo == "B":
         lo, hi = b_min, a_min - 1e-9
-    else:
-        lo, hi = min_s, b_min - 1e-9
+    elif tipo == "C":
+        lo, hi = c_min, b_min - 1e-9
+    elif tipo == "D":
+        lo, hi = d_min, c_min - 1e-9
+    else:  # E
+        lo, hi = min_s, d_min - 1e-9
 
-    # Si el rango pedido es imposible
+    # Si el rango es imposible
     if lo > max_s + 1e-9:
         set_all_indices("max")
         s = score_from_session()
-        return False, s, f"Imposible llegar a {lo:.2f}%. Máximo teórico: {max_s:.2f}%."
+        return False, s, f"No se puede alcanzar {lo:.2f}%. Máximo teórico {max_s:.2f}%."
+
     if hi < min_s - 1e-9:
         set_all_indices("min")
         s = score_from_session()
-        return False, s, f"Imposible bajar a {hi:.2f}%. Mínimo teórico: {min_s:.2f}%."
+        return False, s, f"No se puede bajar de {hi:.2f}%. Mínimo teórico {min_s:.2f}%."
 
-    # ---- Tipo A: construir desde arriba ----
+    # -----------------------
+    # Tipo A → construir desde arriba
+    # -----------------------
     if tipo == "A":
         set_all_indices("max")
         s = score_from_session()
-        if s < a_min - 1e-9:
-            return False, s, f"Máximo {s:.2f}% no llega al umbral A {a_min:.2f}%."
 
-        # Variabilidad: baja algunas variables sin caer por debajo de a_min
+        if s < a_min:
+            return False, s, f"Máximo {s:.2f}% no llega al umbral A."
+
+        # introducir ligera variabilidad
         vars_shuffled = VAR_LIST[:]
         random.shuffle(vars_shuffled)
+
         for var in vars_shuffled:
             key = f"sel_{var}"
             _, xs = CONFIG[var]
-            if len(xs) <= 1:
-                continue
             idx = int(st.session_state[key])
             if idx <= 0:
                 continue
 
             st.session_state[key] = idx - 1
             s2 = score_from_session()
+
             if s2 >= a_min:
                 s = s2
             else:
-                st.session_state[key] = idx  # revert
+                st.session_state[key] = idx
 
         return True, s, f"Cliente A generado (≥ {a_min:.2f}%)."
 
-    # ---- Tipo C: construir desde abajo ----
-    if tipo == "C":
+    # -----------------------
+    # Tipo E → construir desde abajo
+    # -----------------------
+    if tipo == "E":
         set_all_indices("min")
         s = score_from_session()
-        if s >= b_min:
-            return False, s, f"Mínimo {s:.2f}% no baja del umbral B {b_min:.2f}%."
-        return True, s, f"Cliente C generado (< {b_min:.2f}%)."
+        return True, s, f"Cliente E generado (< {d_min:.2f}%)."
 
-    # ---- Tipo B: bajar desde arriba hasta caer en rango ----
-    target_mid = (a_min + b_min) / 2.0
+    # -----------------------
+    # B / C / D → búsqueda aleatoria controlada
+    # -----------------------
+
+    target_mid = (lo + hi) / 2.0
     best_state = None
     best_dist = None
     best_score = None
 
     for _ in range(tries):
-        # arrancamos en max
-        set_all_indices("max")
-        state = current_state_dict()
+        state = {}
+
+        # generar estado aleatorio
+        for var in VAR_LIST:
+            _, xs = CONFIG[var]
+            state[f"sel_{var}"] = random.randint(0, len(xs) - 1)
+
         s = score_from_state(state)
 
-        vars_order = VAR_LIST[:]
-        random.shuffle(vars_order)
-
-        # bajar hasta quedar < a_min
-        for var in vars_order:
-            if s < a_min:
-                break
-            key = f"sel_{var}"
-            _, xs = CONFIG[var]
-            idx = state[key]
-            if idx <= 0:
-                continue
-            state[key] = idx - 1
-            s = score_from_state(state)
-
-        if b_min <= s < a_min:
+        if lo <= s <= hi:
             for k, v in state.items():
                 st.session_state[k] = v
-            return True, s, f"Cliente B generado (entre {b_min:.2f}% y {a_min:.2f}%)."
+            return True, s, f"Cliente {tipo} generado correctamente."
 
         dist = abs(s - target_mid)
         if best_dist is None or dist < best_dist:
@@ -444,14 +460,15 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
             best_state = state
             best_score = s
 
+    # fallback
     if best_state is not None:
         for k, v in best_state.items():
             st.session_state[k] = v
-        return False, float(best_score), "No encontré un B perfecto, te dejo el más cercano."
+        return False, float(best_score), f"No encontré un {tipo} perfecto. Te dejo el más cercano."
 
     set_all_indices("mid")
     s = score_from_session()
-    return False, s, "No pude generar cliente (fallback a intermedio)."
+    return False, s, "Fallback a cliente intermedio."
 
 
 def contributions_from_state(state: Dict[str, int]) -> pd.DataFrame:
@@ -542,11 +559,14 @@ if view == "📊 Scoring":
                 df_res["Score_total_%"] = df_res.apply(score_row, axis=1)
                 df_res["Tipo"] = df_res["Score_total_%"].apply(classify)
 
-                dist = df_res["Tipo"].value_counts(normalize=True).reindex(["A", "B", "C"]).fillna(0) * 100
-                cA, cB, cC = st.columns(3)
-                cA.metric("% Tipo A", f"{dist['A']:.1f}%")
-                cB.metric("% Tipo B", f"{dist['B']:.1f}%")
-                cC.metric("% Tipo C", f"{dist['C']:.1f}%")
+               dist = df_res["Tipo"].value_counts(normalize=True).reindex(["A", "B", "C", "D", "E"]).fillna(0) * 100
+
+cA, cB, cC, cD, cE = st.columns(5)
+cA.metric("% Tipo A", f"{dist['A']:.1f}%")
+cB.metric("% Tipo B", f"{dist['B']:.1f}%")
+cC.metric("% Tipo C", f"{dist['C']:.1f}%")
+cD.metric("% Tipo D", f"{dist['D']:.1f}%")
+cE.metric("% Tipo E", f"{dist['E']:.1f}%")
 
                 st.markdown("### Resultados por cliente")
                 id_col = st.selectbox(
@@ -592,23 +612,36 @@ if view == "📊 Scoring":
     # -------------------------
     st.markdown("## Scoring manual de 1 cliente (inputs)")
 
-    ensure_state()
-    min_s, max_s = min_max_score_possible()
-    st.caption(f"Rango teórico con este modelo: mínimo {min_s:.2f}% · máximo {max_s:.2f}%")
+ensure_state()
+min_s, max_s = min_max_score_possible()
+st.caption(f"Rango teórico con este modelo: mínimo {min_s:.2f}% · máximo {max_s:.2f}%")
 
-    c2, c3, c4 = st.columns(3)
-    with c2:
-        if st.button("🎲 Cliente aleatorio Tipo A (alto)", key="btnA"):
-            ok, s, msg = fill_random_client("A")
-            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
-    with c3:
-        if st.button("🎲 Cliente aleatorio Tipo B (medio)", key="btnB"):
-            ok, s, msg = fill_random_client("B")
-            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
-    with c4:
-        if st.button("🎲 Cliente aleatorio Tipo C (bajo)", key="btnC"):
-            ok, s, msg = fill_random_client("C")
-            (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+c1, c2, c3, c4, c5 = st.columns(5)
+
+with c1:
+    if st.button("🎲 Tipo A (muy alto)", key="btnA"):
+        ok, s, msg = fill_random_client("A")
+        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+
+with c2:
+    if st.button("🎲 Tipo B (alto)", key="btnB"):
+        ok, s, msg = fill_random_client("B")
+        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+
+with c3:
+    if st.button("🎲 Tipo C (medio)", key="btnC"):
+        ok, s, msg = fill_random_client("C")
+        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+
+with c4:
+    if st.button("🎲 Tipo D (bajo)", key="btnD"):
+        ok, s, msg = fill_random_client("D")
+        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
+
+with c5:
+    if st.button("🎲 Tipo E (muy bajo)", key="btnE"):
+        ok, s, msg = fill_random_client("E")
+        (st.success if ok else st.warning)(f"{msg} Score: {s:.2f}%")
 
     left, right = st.columns([1.3, 1])
     rows = []
