@@ -156,7 +156,7 @@ st.title("Calculadora de Scoring de Cliente (con modelo del taller)")
 st.caption("Carga el JSON exportado del taller. Score = Σ(Peso% · x). Modo 1 cliente o archivo masivo.")
 
 # --- LOGO ---
-st.sidebar.image("LOGOTIPO-AES-02.png", use_container_width=True)
+st.sidebar.image("LOGOTIPO-AES-05.png", use_container_width=True)
 st.sidebar.markdown("---")
 
 st.sidebar.header("Modelo (JSON del taller)")
