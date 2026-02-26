@@ -174,13 +174,6 @@ xmin_floor = st.sidebar.slider(
     help="Debe ser el mismo que usaste (o quieras usar) en el taller.",
 )
 
-WEIGHTS, CONFIG = build_model_from_taller_json(model, xmin_floor=xmin_floor, invert_map=invert_map)
-VAR_LIST = list(WEIGHTS.keys())
-
-if not VAR_LIST:
-    st.error("El JSON no contiene variables válidas.")
-    st.stop()
-
 # ----- Tipos A/B/C/D/E -----
 st.sidebar.divider()
 st.sidebar.header("Clasificación A/B/C/D/E")
