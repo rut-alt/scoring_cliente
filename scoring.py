@@ -157,7 +157,7 @@ st.caption("Carga el JSON exportado del taller. Score = Σ(Peso% · x). Modo 1 c
 # -------------------
 # Sidebar
 # -------------------
-view = st.sidebar.radio("Pantalla", ["📊 Scoring", "👤 Resumen estratégico"])
+view = st.sidebar.radio("Pantalla", [" A. Scoring", "B. Resumen estratégico"])
 
 st.sidebar.image("LOGOTIPO-AES-05.png", use_container_width=True)
 st.sidebar.markdown("---")
@@ -173,35 +173,6 @@ xmin_floor = st.sidebar.slider(
     step=0.01,
     help="Debe ser el mismo que usaste (o quieras usar) en el taller.",
 )
-
-st.sidebar.divider()
-st.sidebar.subheader("Variables invertidas (más = peor)")
-st.sidebar.caption("Marca las variables donde el orden natural es “más es peor”.")
-
-DEFAULT_INVERT = {
-    "Descuentos o Recargos aplicados sobre tarifa": True,
-    "Morosidad: Históricos sin incidencia en devolución (Anotaciones de póliza)": True,
-}
-
-invert_map: Dict[str, bool] = {}
-
-if uploaded_model is None:
-    st.info("Sube el JSON del taller en la barra lateral para cargar pesos/k/etiquetas.")
-    st.stop()
-
-try:
-    model = json.load(uploaded_model)
-except Exception as e:
-    st.error(f"No he podido leer el JSON: {e}")
-    st.stop()
-
-var_names = [v.get("name") for v in model.get("variables", []) if isinstance(v, dict) and v.get("name")]
-for name in var_names:
-    invert_map[name] = st.sidebar.checkbox(
-        name,
-        value=DEFAULT_INVERT.get(name, False),
-        key=f"inv_{name}",
-    )
 
 WEIGHTS, CONFIG = build_model_from_taller_json(model, xmin_floor=xmin_floor, invert_map=invert_map)
 VAR_LIST = list(WEIGHTS.keys())
