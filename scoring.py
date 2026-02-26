@@ -193,7 +193,7 @@ DEFAULT_INVERT = {
 invert_map: Dict[str, bool] = {}
 
 if uploaded_model is None:
-    st.info("👈 Sube el JSON del taller en la barra lateral para cargar pesos/k/etiquetas.")
+    st.info("Sube el JSON del taller en la barra lateral para cargar pesos/k/etiquetas.")
     st.stop()
 
 try:
@@ -286,7 +286,7 @@ def score_row(row: pd.Series) -> float:
 # Modo archivo (batch)
 # =========================================================
 
-st.markdown("## 📤 Subir archivo para scoring masivo (varias filas)")
+st.markdown("## Subir archivo para scoring masivo (varias filas)")
 uploaded = st.file_uploader("Sube CSV o Excel con una fila por cliente (columnas = variables)", type=["csv", "xlsx"])
 
 
