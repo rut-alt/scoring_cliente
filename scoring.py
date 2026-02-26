@@ -155,6 +155,11 @@ st.set_page_config(page_title="Calculadora Scoring Cliente", layout="wide")
 st.title("Calculadora de Scoring de Cliente (con modelo del taller)")
 st.caption("Carga el JSON exportado del taller. Score = Σ(Peso% · x). Modo 1 cliente o archivo masivo.")
 
+# --- LOGO ---
+st.sidebar.image("LOGOTIPO-AES-02.png", use_container_width=True)
+st.sidebar.markdown("---")
+
+st.sidebar.header("Modelo (JSON del taller)")
 st.sidebar.header("Modelo (JSON del taller)")
 uploaded_model = st.sidebar.file_uploader("Sube el JSON exportado del taller", type=["json"])
 
