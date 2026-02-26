@@ -310,19 +310,27 @@ def min_max_score_possible() -> Tuple[float, float]:
 
 
 def set_all_indices(mode: str):
+    """
+    mode:
+      'max' -> índice con x máximo
+      'min' -> índice con x mínimo
+      'mid' -> índice intermedio (n//2) (por orden visual)
+    """
     for var in VAR_LIST:
         _, xs = CONFIG[var]
         n = len(xs)
         if n <= 1:
             st.session_state[f"sel_{var}"] = 0
-        else:
-            if mode == "max":
-                st.session_state[f"sel_{var}"] = n - 1
-            elif mode == "min":
-                st.session_state[f"sel_{var}"] = 0
-            else:
-                st.session_state[f"sel_{var}"] = n // 2
+            continue
 
+        if mode == "max":
+            best_idx = max(range(n), key=lambda i: xs[i])   # argmax
+            st.session_state[f"sel_{var}"] = best_idx
+        elif mode == "min":
+            worst_idx = min(range(n), key=lambda i: xs[i])  # argmin
+            st.session_state[f"sel_{var}"] = worst_idx
+        else:
+            st.session_state[f"sel_{var}"] = n // 2
 
 def current_state_dict() -> Dict[str, int]:
     return {f"sel_{v}": int(st.session_state.get(f"sel_{v}", 0)) for v in VAR_LIST}
