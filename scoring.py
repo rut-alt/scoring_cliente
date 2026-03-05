@@ -12,112 +12,81 @@ from openpyxl import Workbook
 
 
 # =========================================================
-# 1) LÓGICA DEL TALLER (generate_scale + xmin_floor)
+# 1) LÓGICA (usar gaps del JSON del taller)
 # =========================================================
 
 @dataclass(frozen=True)
 class CategoryResult:
     j: int
-    x: float                 # valor normalizado en [xmin, 1]
+    x: float                 # valor normalizado
     contribution: float      # w * x (proporción)
     contribution_pct: float  # w * x en %
     delta_from_prev: float   # incremento vs categoría anterior (proporción)
     delta_from_prev_pct: float
 
 
-def xmin_by_weight(w: float) -> float:
-    peso_pct = round(w * 100, 1)
-    if peso_pct <= 0:
-        return 0.0
-
-    mapping = {
-        7.5: 0.00,
-        5.5: 0.05,
-        5.0: 0.10,
-        4.5: 0.15,
-        4.0: 0.20,
-        3.0: 0.25,
-        2.5: 0.30,
-        2.0: 0.35,
-        1.5: 0.40,
-        1.0: 0.45,
-        0.5: 0.50,
-        0.0: 0.0,
-    }
-    return mapping.get(peso_pct, 0.20)
+def clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
 
 
-def generate_scale(
-    peso_pct: float,
-    k: int,
-    xmin: Optional[float] = None,
-    xmin_floor: float = 0.01,
-) -> Dict:
+def gaps_to_x(k: int, gaps: List[float], cap_mode: str = "clip") -> Dict:
+    """
+    Construye x(j) con x(k)=1 y gaps (penalizaciones) no negativas entre categorías.
+
+    - K=1 = peor, K=k = mejor
+    - gaps: longitud k-1
+      gap_t = caída entre K=t (peor) y K=t+1 (mejor), medido en escala 0..1
+    - Restricción deseada: sum(gaps) <= 1
+    - cap_mode:
+        clip  -> si sum>1 recorta el último gap para que sum=1
+        scale -> si sum>1 reescala todos los gaps proporcionalmente para que sum=1
+    """
     if k < 2:
-        raise ValueError("k debe ser >= 2 (mínimo 2 categorías).")
+        raise ValueError("k debe ser >= 2.")
 
-    w = peso_pct / 100.0
+    gaps = list(gaps or [])
+    if len(gaps) < k - 1:
+        gaps += [0.0] * ((k - 1) - len(gaps))
+    if len(gaps) > k - 1:
+        gaps = gaps[: k - 1]
+    gaps = [max(0.0, float(g)) for g in gaps]
 
-    if xmin is None:
-        xmin = xmin_by_weight(w)
-
-    xmin = max(float(xmin_floor), float(xmin))
-    xmin = max(0.0, min(1.0, float(xmin)))
-
-    results: List[CategoryResult] = []
-    prev_contrib = 0.0
-
-    for j in range(1, k + 1):
-        if w == 0:
-            x = 0.0
+    s = sum(gaps)
+    if s > 1.0 + 1e-12:
+        if cap_mode == "scale" and s > 0:
+            gaps = [g / s for g in gaps]  # ahora suma 1
         else:
-            x = xmin + (j - 1) * (1.0 - xmin) / (k - 1)
+            excess = s - 1.0
+            gaps[-1] = max(0.0, gaps[-1] - excess)
 
-        contrib = w * x
-        delta = contrib - prev_contrib if j > 1 else 0.0
+    s_eff = sum(gaps)
+    remaining = max(0.0, 1.0 - s_eff)
 
-        results.append(
-            CategoryResult(
-                j=j,
-                x=round(x, 6),
-                contribution=round(contrib, 6),
-                contribution_pct=round(contrib * 100.0, 4),
-                delta_from_prev=round(delta, 6),
-                delta_from_prev_pct=round(delta * 100.0, 4),
-            )
-        )
-        prev_contrib = contrib
+    # x_k = 1 y vamos bajando
+    xs = [0.0] * k
+    xs[-1] = 1.0
+    acc = 0.0
+    for idx in range(k - 2, -1, -1):
+        acc += gaps[idx]
+        xs[idx] = clamp01(1.0 - acc)
 
-    x_min_effective = results[0].x if results else 0.0
-    x_max_effective = results[-1].x if results else 0.0
-    delta_max = w * (x_max_effective - x_min_effective)
-
-    return {
-        "peso_pct": float(peso_pct),
-        "w": float(w),
-        "k": int(k),
-        "xmin": float(xmin),
-        "x_min_effective": float(x_min_effective),
-        "x_max_effective": float(x_max_effective),
-        "delta_max": round(float(delta_max), 6),
-        "delta_max_pct": round(float(delta_max) * 100.0, 4),
-        "categories": results,
-    }
+    xs[-1] = 1.0
+    return {"x_values": xs, "gaps_eff": gaps, "sum_gaps": s_eff, "remaining": remaining}
 
 
 def build_model_from_taller_json(
     model_dict: dict,
-    xmin_floor: float,
 ) -> Tuple[Dict[str, float], Dict[str, Tuple[List[str], List[float]]]]:
     """
-    IMPORTANTE:
-    Asumimos que el taller ya define el orden:
-      K=1 = peor
-      K=k = mejor
-    Por tanto NO hay variables invertidas aquí.
+    Lee el JSON exportado del taller y construye:
+      WEIGHTS: {variable: peso_pct}
+      CONFIG : {variable: (labels, xs)} donde xs = lista x(j) peor->mejor basada en gaps del JSON.
     """
     weights: Dict[str, float] = {}
     config: Dict[str, Tuple[List[str], List[float]]] = {}
+
+    settings = model_dict.get("settings") or {}
+    cap_mode = settings.get("cap_mode", "clip")
 
     for v in model_dict.get("variables", []):
         name = str(v.get("name", "")).strip()
@@ -127,7 +96,9 @@ def build_model_from_taller_json(
         peso = float(v.get("peso_pct", 0.0))
         k = int(v.get("k", 3))
         labels = list(v.get("labels") or [])
+        gaps = list(v.get("gaps") or [])
 
+        # normalizar labels a longitud k
         if len(labels) < k:
             labels = labels + [""] * (k - len(labels))
         if len(labels) > k:
@@ -138,8 +109,8 @@ def build_model_from_taller_json(
             for i, lab in enumerate(labels)
         ]
 
-        scale = generate_scale(peso_pct=peso, k=k, xmin=None, xmin_floor=xmin_floor)
-        xs = [c.x for c in scale["categories"]]  # peor -> mejor
+        conv = gaps_to_x(k=k, gaps=gaps, cap_mode=cap_mode)
+        xs = conv["x_values"]  # peor -> mejor (K=1 .. K=k)
 
         weights[name] = peso
         config[name] = (labels, xs)
@@ -182,14 +153,8 @@ st.sidebar.markdown("---")
 st.sidebar.header("Modelo (JSON del taller)")
 uploaded_model = st.sidebar.file_uploader("Sube el JSON exportado del taller", type=["json"])
 
-xmin_floor = st.sidebar.slider(
-    "Suelo mínimo xmin",
-    min_value=0.0,
-    max_value=0.30,
-    value=0.01,
-    step=0.01,
-    help="Debe ser el mismo que usaste (o quieras usar) en el taller.",
-)
+# (opcional) lo dejamos solo para mostrarlo en UI, ya no se usa para xs
+st.sidebar.caption("Nota: en esta calculadora los x se leen del JSON (gaps). El slider xmin_floor ya no aplica.")
 
 
 def classify(score: float) -> str:
@@ -206,7 +171,7 @@ def classify(score: float) -> str:
 
 # --- Cargar JSON y construir modelo ANTES de usar WEIGHTS/CONFIG ---
 if uploaded_model is None:
-    st.info("Sube el JSON del taller en la barra lateral para cargar pesos/k/etiquetas.")
+    st.info("Sube el JSON del taller en la barra lateral para cargar pesos/k/etiquetas/gaps.")
     st.stop()
 
 try:
@@ -215,7 +180,7 @@ except Exception as e:
     st.error(f"No he podido leer el JSON: {e}")
     st.stop()
 
-WEIGHTS, CONFIG = build_model_from_taller_json(model, xmin_floor=xmin_floor)
+WEIGHTS, CONFIG = build_model_from_taller_json(model)
 VAR_LIST = list(WEIGHTS.keys())
 
 if not VAR_LIST:
@@ -233,12 +198,14 @@ def x_from_value(var: str, val) -> float:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return 0.0
 
+    # si viene índice numérico
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         idx = int(val)
         if 0 <= idx < len(labels):
             return float(xs[idx])
         return 0.0
 
+    # si viene etiqueta exacta o string numérico
     if isinstance(val, str):
         v = val.strip()
         if v in labels:
@@ -381,7 +348,6 @@ def fill_random_client(tipo: str, tries: int = 400) -> Tuple[bool, float, str]:
             _, xs = CONFIG[var]
             idx = int(st.session_state[key])
 
-            # buscamos el siguiente índice "peor" (reduce x) de forma segura
             candidates = [i for i in range(len(xs)) if xs[i] < xs[idx]]
             if not candidates:
                 continue
@@ -639,7 +605,6 @@ if view == "A. Scoring":
     st.markdown("## Fórmula")
     st.latex(r"Score=\sum_i (Peso_i \cdot x_i)")
 
-
 # =========================================================
 # VISTA B: RESUMEN ESTRATÉGICO
 # =========================================================
@@ -679,6 +644,4 @@ else:
 
     st.divider()
     st.markdown("### 🧾 Notas")
-    st.write(
-        "Los ejemplos se recalculan con tu JSON, xmin_floor y los umbrales A/B/C/D/E actuales."
-    )
+    st.write("Los ejemplos se recalculan con tu JSON y los umbrales A/B/C/D/E actuales.")
