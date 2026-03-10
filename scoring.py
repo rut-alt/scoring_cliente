@@ -6,8 +6,15 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 import streamlit as st
+
+st.set_page_config(
+    page_title="Taller Scoring - Europea Seguros",
+    page_icon="REDUCCION-AES-01.png",
+    layout="wide"
+)
+
+import pandas as pd
 from openpyxl import Workbook
 
 
